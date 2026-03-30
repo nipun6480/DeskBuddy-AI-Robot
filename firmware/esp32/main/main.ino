@@ -10,11 +10,11 @@
 #define BUZZER_PIN 3
 #define TOUCH_PIN 4
 
-// --- SETTINGS ---
+// --- DRIVERS ---
 DHT dht(DHT_PIN, DHT11);
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
-// --- ROBOT STATES ---
+// --- STATES ---
 enum State { HOME, BLINK, HEART, EXCITED, TIMER_MODE };
 State currentState = HOME;
 
@@ -43,7 +43,6 @@ void setup() {
   autoBlinkTimer = millis();
 }
 
-// --- DRAWING FUNCTIONS ---
 void drawEyes(bool closed) {
   u8g2.setDrawColor(1);
   if (closed) {
@@ -55,7 +54,7 @@ void drawEyes(bool closed) {
 
 void drawHome() {
   u8g2.setFont(u8g2_font_logisoso24_tf);
-  u8g2.drawStr(25, 45, "18:45"); // Time Placeholder
+  u8g2.drawStr(25, 45, "18:20"); // Time placeholder
   u8g2.setFont(u8g2_font_6x10_tf);
   u8g2.setCursor(45, 60); u8g2.print(dht.readTemperature(), 1); u8g2.print("C");
 }
@@ -65,7 +64,7 @@ void loop() {
   unsigned long now = millis();
   bool touching = digitalRead(TOUCH_PIN);
 
-  // --- 1. GESTURE ENGINE ---
+  // --- GESTURE ENGINE ---
   if (touching && !lastTouchState) {
     lastTouchTime = now;
     digitalWrite(BUZZER_PIN, HIGH); delay(30); digitalWrite(BUZZER_PIN, LOW);
@@ -86,21 +85,20 @@ void loop() {
   if (tapCount > 0 && (now - lastTouchTime > TAP_GAP_MS)) {
     if (currentState == TIMER_MODE) {
         if (tapCount == 1) { 
-          isTimerRunning = !isTimerRunning; // Play/Pause
+          isTimerRunning = !isTimerRunning; 
         }
-        if (tapCount == 2) { 
-          // Cycle through 50, 25, 10, 5
+        else if (tapCount == 2) { 
           currentOptionIndex = (currentOptionIndex + 1) % 4;
-          remainingSeconds = timerOptions[currentOptionIndex] * 60;
-          isTimerRunning = false; // Reset to pause when changing time
+          remainingSeconds = (long)timerOptions[currentOptionIndex] * 60;
+          isTimerRunning = false;
         }
     } else {
         if (tapCount == 1) currentState = BLINK;
-        if (tapCount == 2) currentState = HEART;
-        if (tapCount == 3) currentState = EXCITED;
-        if (tapCount == 4) {
+        else if (tapCount == 2) currentState = HEART;
+        else if (tapCount == 3) currentState = EXCITED;
+        else if (tapCount == 4) {
           currentState = TIMER_MODE;
-          remainingSeconds = timerOptions[currentOptionIndex] * 60;
+          remainingSeconds = (long)timerOptions[currentOptionIndex] * 60;
           isTimerRunning = false;
         }
     }
@@ -109,18 +107,18 @@ void loop() {
   }
   lastTouchState = touching;
 
-  // --- 2. TIMER LOGIC ---
+  // --- TIMER COUNTDOWN ---
   if (isTimerRunning && (now - lastTick >= 1000)) {
     lastTick = now;
     if (remainingSeconds > 0) remainingSeconds--;
     else {
       isTimerRunning = false;
-      for(int i=0; i<3; i++) { digitalWrite(BUZZER_PIN, HIGH); delay(300); digitalWrite(BUZZER_PIN, LOW); delay(100); }
+      for(int i=0; i<5; i++) { digitalWrite(BUZZER_PIN, HIGH); delay(200); digitalWrite(BUZZER_PIN, LOW); delay(100); }
       currentState = HOME;
     }
   }
 
-  // --- 3. STATE MACHINE RENDERING ---
+  // --- RENDERING ---
   switch (currentState) {
     case HOME:
       drawHome();
@@ -149,9 +147,13 @@ void loop() {
       u8g2.setFont(u8g2_font_haxrcorp4089_tr);
       u8g2.drawStr(35, 12, isTimerRunning ? "RUNNING..." : "PAUSED");
       
-      // Draw Pause/Play Icon
-      if (isTimerRunning) u8g2.drawBox(110, 5, 3, 8); u8g2.drawBox(115, 5, 3, 8);
-      else u8g2.drawTriangle(110, 5, 110, 13, 118, 9);
+      // Fixed Icon Drawing
+      if (isTimerRunning) {
+          u8g2.drawBox(110, 5, 3, 8); 
+          u8g2.drawBox(115, 5, 3, 8);
+      } else {
+          u8g2.drawTriangle(110, 5, 110, 13, 118, 9);
+      }
 
       u8g2.setFont(u8g2_font_logisoso20_tf);
       u8g2.setCursor(30, 45);
@@ -160,7 +162,7 @@ void loop() {
       u8g2.print(remainingSeconds % 60);
       
       u8g2.setFont(u8g2_font_6x10_tf);
-      u8g2.drawStr(25, 62, "2-Tap: Change Time");
+      u8g2.drawStr(10, 62, "1-Tap: Play/Pause  2-Tap: Time");
       break;
   }
 
