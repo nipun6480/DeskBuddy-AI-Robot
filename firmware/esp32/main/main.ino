@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <DHT.h>
 #include <WiFi.h>
+#include <HTTPClient.h> // CRITICAL: Added for Weather API
 #include <esp_wifi.h> 
 #include "time.h"
 
@@ -13,31 +14,95 @@
 #define BUZZER_PIN 5   
 #define TOUCH_PIN 7    
 
-// --- WIFI CREDENTIALS ---
+// --- WIFI & API CREDENTIALS ---
 const char* ssid     = "S23";
 const char* password = "64806480@@";
+const char* weatherKey = "ba371108128cd4ff95ec890107d5c6a1"; // OpenWeatherMap Key
+const char* city       = "Dimapur,IN";
 
+// --- OBJECT INSTANTIATION ---
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 DHT dht(DHT_PIN, DHT11);
 
-// --- GLOBALS ---
-enum State { HOME, BLINK, HEART, EXCITED, TIMER_MODE, PETTING };
+// --- STATE MACHINE ---
+enum State { HOME, BLINK, HEART, EXCITED, TIMER_MODE, PETTING, COMPLIMENT };
 State currentState  = HOME;
 State previousState = HOME;
-int  clockFormat    = 3;
-bool isTimerRunning = false;
-int  timerOptions[] = {50, 25, 10, 5, 1};
-int  currentOptionIndex = 1;
+
+// --- CLOCK & DISPLAY SETTINGS ---
+int clockFormat = 3; // Default clock style
+const unsigned long AUTO_BLINK_INTERVAL = 60000; // Auto-blink every 60s
+unsigned long lastAutoBlink = 0; 
+bool isAutoBlink = false; // True if Romi blinks on his own (Silent/No text)
+
+// --- TIMER (POMODORO) SETTINGS ---
+bool isTimerRunning     = false;
+int  timerOptions[]     = {50, 25, 10, 5, 1}; // Minutes
+int  currentOptionIndex = 1;                  // Default 25 mins
 long remainingSeconds   = 25 * 60;
-unsigned long stateStartTime = 0;
-unsigned long lastTouchTime  = 0;
-unsigned long lastTick       = 0;
-unsigned long lastAutoBlink  = 0; 
-int  tapCount       = 0;
-bool lastTouchState = LOW;
-const unsigned long LONG_PRESS_MS = 1000;
-const unsigned long TAP_GAP_MS    = 450;
-const unsigned long AUTO_BLINK_INTERVAL = 30000; 
+unsigned long lastTick  = 0;                  // For countdown timing
+
+// --- TOUCH & GESTURE TRACKING ---
+unsigned long stateStartTime = 0;             // Tracks how long Romi stays in a state
+unsigned long lastTouchTime  = 0;             // For debouncing and long press
+int  tapCount       = 0;                      // Tracks 1, 2, 3, 4, or 5 taps
+bool lastTouchState = LOW;                    // Prevents multiple triggers
+const unsigned long LONG_PRESS_MS = 1000;     // 1 second for Rabbit mode
+const unsigned long TAP_GAP_MS    = 450;      // Time allowed between taps
+
+// --- WEATHER DATA ---
+String currentWeather = "Clear";              // Text description (Cloudy, Rain, etc.)
+int currentTemp       = 0;                    // Temperature from API
+unsigned long lastWeatherUpdate = 0;          // Track last sync
+const unsigned long WEATHER_INTERVAL = 1800000; // Update every 30 mins
+
+// --- PERSONALIZATION ---
+int selectedCompliment = 0;                   // Index of the 100 compliments
+void updateWeather() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + String(city) + "&units=metric&appid=" + String(weatherKey);
+    http.begin(url);
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      String payload = http.getString();
+      // Simple parsing (to save memory instead of using ArduinoJson)
+      int tempIdx = payload.indexOf("\"temp\":") + 7;
+      currentTemp = payload.substring(tempIdx, payload.indexOf(",", tempIdx)).toInt();
+      int mainIdx = payload.indexOf("\"main\":\"") + 8;
+      currentWeather = payload.substring(mainIdx, payload.indexOf("\"", mainIdx));
+    }
+    http.end();
+  }
+}
+
+//wether icon
+void drawWeatherIcon(int x, int y) {
+  // Check if it's night time for the moon icon
+  struct tm t;
+  getLocalTime(&t);
+  bool isNight = (t.tm_hour >= 18 || t.tm_hour < 6);
+
+  if (currentWeather == "Rain" || currentWeather == "Drizzle") {
+    u8g2.drawCircle(x, y-2, 3); u8g2.drawCircle(x+3, y-2, 3); // Small Cloud
+    u8g2.drawLine(x, y+2, x-1, y+4); u8g2.drawLine(x+3, y+2, x+2, y+4); // Rain drops
+  } 
+  else if (isNight && (currentWeather == "Clear")) {
+    u8g2.drawCircle(x, y, 4); // Moon base
+    u8g2.setDrawColor(0);
+    u8g2.drawCircle(x+2, y-2, 4); // Moon crescent cutout
+    u8g2.setDrawColor(1);
+  }
+  else if (currentWeather == "Clouds") {
+    u8g2.drawCircle(x-2, y, 3); u8g2.drawCircle(x+2, y, 4); u8g2.drawBox(x-2, y+1, 5, 2);
+  }
+  else { // Sunny
+    u8g2.drawDisc(x, y, 3);
+    for(int i=0; i<360; i+=90) { // Simple 4-point sun rays
+      u8g2.drawLine(x, y, x+(cos(i)*6), y+(sin(i)*6));
+    }
+  }
+}
 
 void setManualTime() {
   struct tm tm;
@@ -50,6 +115,42 @@ void setManualTime() {
   time_t t = mktime(&tm);
   struct timeval tv = { .tv_sec = t };
   settimeofday(&tv, NULL);
+}
+//complement
+const char* compliments[] = {
+  "STAY BRIGHT", "CHASE DREAMS", "PURE TALENT", "BORN STAR", "ALWAYS KIND",
+  "KEEP GLOWING", "SO SMART", "TRUE GENIUS", "SHINE ON", "VERY BRAVE",
+  "STAY UNIQUE", "REALLY WISE", "TOP TIER", "SIMPLY BEST", "STAY STRONG",
+  "SO CREATIVE", "HIGH ENERGY", "PURE HEART", "STAY BOLD", "VERY CALM",
+  "KEEP RISING", "STAY FIERCE", "SO HUMBLE", "REALLY COOL", "STAY REAL",
+  "KEEP GOING", "SO CAPABLE", "TRUE LEADER", "STAY RADIANT", "SO VIBRANT",
+  "REALLY GIFTED", "KEEP WINNING", "STAY HAPPY", "SO POLITE", "REALLY FUN",
+  "STAY CALM", "KEEP SMILING", "SO HELPFUL", "TRUE ICON", "STAY FRESH",
+  "KEEP TRYING", "SO FOCUSED", "REALLY NEAT", "STAY ACTIVE", "KEEP FLYING",
+  "SO HONEST", "TRUE GEM", "STAY SWEET", "KEEP WALKING", "SO GRACEFUL",
+  "REALLY QUICK", "STAY STEADY", "KEEP ASKING", "SO CHEERFUL", "TRUE PRO",
+  "STAY WARM", "KEEP SHINING", "SO LIVELY", "REALLY DEEP", "STAY TOUGH",
+  "KEEP CARING", "SO PATIENT", "TRUE ORIGINAL", "STAY OPEN", "KEEP LEARNING",
+  "SO GENTLE", "REALLY BRIGHT", "STAY LOVELY", "KEEP HELPING", "SO LOYAL",
+  "REALLY FAIR", "STAY PROUD", "KEEP BELIEVING", "SO FRIENDLY", "TRUE WONDER",
+  "STAY READY", "KEEP DREAMING", "SO KEEN", "REALLY SMART", "STAY ALERT",
+  "KEEP WORKING", "SO SHARP", "REALLY FINE", "STAY VIGILANT", "KEEP SMILING",
+  "SO RADIANT", "REALLY STUNNING", "STAY PEACEFUL", "KEEP GROWING", "SO MAGICAL",
+  "REALLY SOLID", "STAY CLASSY", "KEEP BUILDING", "SO FEARLESS", "TRUE POWER",
+  "STAY BRIGHT", "KEEP INSPIRING", "SO DRIVEN", "REALLY AWESOME", "STAY GOLD"
+};
+// Change the array size tracker
+
+void drawSleepyEye(int x, int y, bool closed) {
+  if (closed) {
+    u8g2.drawRBox(x - 17, y + 5, 34, 4, 1); // Very thin closed line
+  } else {
+    u8g2.drawRBox(x - 17, y - 17, 34, 34, 5); // Main Eye
+    u8g2.setDrawColor(0);
+    u8g2.drawBox(x - 18, y - 18, 36, 18); // Solid black lid covering top half
+    u8g2.drawDisc(x, y + 5, 4); // Tired pupil at the bottom
+    u8g2.setDrawColor(1);
+  }
 }
 
 // --- UPDATED PORTION: BIGGER CUTE EYES ---
@@ -277,6 +378,8 @@ void setup() {
 void drawHome() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo)) return;
+
+  // --- TOP DATE BAR ---
   u8g2.setDrawColor(1);
   u8g2.drawRBox(15, 2, 98, 13, 3);
   u8g2.setDrawColor(0);
@@ -288,33 +391,45 @@ void drawHome() {
   u8g2.drawStr(20, 12, dateBuf);
   u8g2.setDrawColor(1);
 
+  // --- MAIN CLOCK ---
   int h = timeinfo.tm_hour;
   char timeBuf[25];
-  if (clockFormat == 0) {
-    bool isPM = (h >= 12); h = h % 12; if (h == 0) h = 12;
-    u8g2.setFont(u8g2_font_logisoso20_tn);
-    sprintf(timeBuf, "%02d:%02d:%02d", h, timeinfo.tm_min, timeinfo.tm_sec);
-    u8g2.drawStr(5, 42, timeBuf);
-    u8g2.setFont(u8g2_font_haxrcorp4089_tr); u8g2.drawStr(105, 42, isPM ? "PM" : "AM");
-  } else if (clockFormat == 1) {
-    bool isPM = (h >= 12); h = h % 12; if (h == 0) h = 12;
-    u8g2.setFont(u8g2_font_logisoso28_tn);
-    sprintf(timeBuf, "%02d:%02d", h, timeinfo.tm_min);
-    u8g2.drawStr(20, 45, timeBuf);
-    u8g2.setFont(u8g2_font_haxrcorp4089_tr); u8g2.drawStr(105, 45, isPM ? "PM" : "AM");
-  } else if (clockFormat == 2) {
-    u8g2.setFont(u8g2_font_logisoso20_tn);
-    sprintf(timeBuf, "%02d:%02d:%02d", h, timeinfo.tm_min, timeinfo.tm_sec);
-    u8g2.drawStr(15, 42, timeBuf);
-  } else {
-    u8g2.setFont(u8g2_font_logisoso28_tn);
-    sprintf(timeBuf, "%02d:%02d", h, timeinfo.tm_min);
-    u8g2.drawStr(25, 45, timeBuf);
-  }
-  u8g2.drawLine(0, 52, 128, 52);
+  u8g2.setFont(u8g2_font_logisoso28_tn);
+  bool isPM = (h >= 12); h = h % 12; if (h == 0) h = 12;
+  sprintf(timeBuf, "%02d:%02d", h, timeinfo.tm_min);
+  u8g2.drawStr(20, 45, timeBuf);
+  u8g2.setFont(u8g2_font_haxrcorp4089_tr); 
+  u8g2.drawStr(105, 45, isPM ? "PM" : "AM");
+
+  // --- BOTTOM DASHBOARD ---
+  u8g2.drawLine(0, 50, 128, 50);
+
+  // LEFT SIDE: Local Sensor (e.g., 23.5°C)
   u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.setCursor(10, 63); u8g2.print("Tem:"); u8g2.print(dht.readTemperature(), 0); u8g2.print("C");
-  u8g2.setCursor(75, 63); u8g2.print("Hum:"); u8g2.print((int)dht.readHumidity()); u8g2.print("%");
+  u8g2.setCursor(4, 62); 
+  // The ,1 here ensures one decimal place is shown
+  u8g2.print(dht.readTemperature(), 1); 
+  u8g2.print((char)176); u8g2.print("C"); 
+  
+  u8g2.setCursor(44, 62); 
+  u8g2.print((int)dht.readHumidity()); u8g2.print("%");
+
+  // --- RIGHT SIDE: WIFI/WEATHER ---
+  if (WiFi.status() == WL_CONNECTED) {
+    u8g2.drawLine(64, 50, 64, 64);
+    u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+    
+    drawWeatherIcon(74, 57); 
+
+    // Outside Condition
+    u8g2.setCursor(86, 57);
+    u8g2.print(currentWeather); 
+
+    // Outside Temp (e.g., 22.0°C)
+    u8g2.setCursor(86, 64);
+    u8g2.print((float)currentTemp, 1); 
+    u8g2.print((char)176); u8g2.print("C");
+  }
 }
 
 void loop() {
@@ -322,10 +437,32 @@ void loop() {
   unsigned long now = millis();
   bool touching = digitalRead(TOUCH_PIN);
 
-  if (currentState == HOME && (now - lastAutoBlink >= AUTO_BLINK_INTERVAL)) {
-    currentState = BLINK; stateStartTime = now; lastAutoBlink = now;
+  // Update weather every 30 mins
+  if (now - lastWeatherUpdate > WEATHER_INTERVAL) {
+    updateWeather();
+    lastWeatherUpdate = now;
   }
 
+  if (tapCount == 1 && (now - lastTouchTime > TAP_GAP_MS)) {
+    struct tm timeinfo;
+    getLocalTime(&timeinfo);
+    
+    // Trigger Sleepy Mode between 7AM and 9AM
+    if (timeinfo.tm_hour >= 7 && timeinfo.tm_hour < 9) {
+       currentState = BLINK; // We will use a flag to show sleepy eyes in BLINK
+    }
+    // ... rest of your tap logic
+  }
+
+  // --- 1. AUTO BLINK TRIGGER (60 SEC, SILENT) ---
+  if (currentState == HOME && (now - lastAutoBlink >= AUTO_BLINK_INTERVAL)) {
+    isAutoBlink = true; 
+    currentState = BLINK; 
+    stateStartTime = now; 
+    lastAutoBlink = now;
+  }
+
+  // --- 2. TOUCH HANDLING ---
   if (touching && !lastTouchState) lastTouchTime = now;
   if (touching && (now - lastTouchTime > LONG_PRESS_MS)) {
     if (currentState != PETTING) previousState = currentState;
@@ -337,6 +474,7 @@ void loop() {
     lastTouchTime = now;
   }
 
+  // --- 3. TAP SEQUENCE LOGIC ---
   if (tapCount > 0 && (now - lastTouchTime > TAP_GAP_MS)) {
     if (currentState == TIMER_MODE) {
       if (tapCount == 1) { isTimerRunning = !isTimerRunning; digitalWrite(BUZZER_PIN, HIGH); delay(20); digitalWrite(BUZZER_PIN, LOW); }
@@ -348,6 +486,8 @@ void loop() {
       }
       else if (tapCount == 3) { currentState = HOME; isTimerRunning = false; remainingSeconds = (long)timerOptions[currentOptionIndex] * 60; }
     } else {
+      // MANUAL TAPS - NOT AUTO BLINK
+      isAutoBlink = false; 
       if (tapCount == 1)      { currentState = BLINK;   stateStartTime = now; lastAutoBlink = now; } 
       else if (tapCount == 2) { currentState = HEART;   stateStartTime = now; }
       else if (tapCount == 3) { currentState = EXCITED; stateStartTime = now; }
@@ -358,6 +498,7 @@ void loop() {
   }
   lastTouchState = touching;
 
+  // --- 4. TIMER TICK LOGIC ---
   if (isTimerRunning && (now - lastTick >= 1000)) {
     lastTick = now;
     if (remainingSeconds > 0) { remainingSeconds--; digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(200); digitalWrite(BUZZER_PIN, LOW); } 
@@ -368,129 +509,145 @@ void loop() {
     }
   }
 
-  // --- DRAW STATES ---
+  // --- 5. STATE RENDERING ---
   switch (currentState) {
     case HOME: drawHome(); break;
-    case TIMER_MODE: {
+
+    case TIMER_MODE:
       u8g2.setFont(u8g2_font_logisoso28_tn);
-      char buf[10];
-      sprintf(buf, "%02ld:%02ld", remainingSeconds / 60, remainingSeconds % 60);
-      u8g2.drawStr(20, 45, buf);
+      char tBuf[10];
+      sprintf(tBuf, "%02ld:%02ld", remainingSeconds / 60, remainingSeconds % 60);
+      u8g2.drawStr(20, 45, tBuf);
       u8g2.setFont(u8g2_font_haxrcorp4089_tr);
       u8g2.drawStr(25, 12, isTimerRunning ? "RUNNING..." : "TIMER SET");
       break;
+
+    case COMPLIMENT: {
+      unsigned long elapsed = now - stateStartTime;
+      u8g2.clearBuffer();
+
+      String msg = String(compliments[selectedCompliment]);
+      String words[3];
+      int wordCount = 0;
+
+      // --- WORD SPLITTER ---
+      int spaceIdx = -1;
+      int lastIdx = 0;
+      while ((spaceIdx = msg.indexOf(' ', lastIdx)) != -1 && wordCount < 2) {
+        words[wordCount++] = msg.substring(lastIdx, spaceIdx);
+        lastIdx = spaceIdx + 1;
+      }
+      words[wordCount++] = msg.substring(lastIdx);
+
+      // --- ULTRA-BOLD SCALING ---
+      if (wordCount == 1) {
+        // One Word: Huge and Thick
+        u8g2.setFont(u8g2_font_logisoso20_tf); 
+        int w = u8g2.getStrWidth(words[0].c_str());
+        u8g2.drawStr(64 - (w / 2), 42, words[0].c_str());
+      } 
+      else if (wordCount == 2) {
+        // Two Words: Very Bold
+        u8g2.setFont(u8g2_font_helvB12_tf); 
+        int w1 = u8g2.getStrWidth(words[0].c_str());
+        int w2 = u8g2.getStrWidth(words[1].c_str());
+        u8g2.drawStr(64 - (w1 / 2), 30, words[0].c_str());
+        u8g2.drawStr(64 - (w2 / 2), 52, words[1].c_str());
+      } 
+      else {
+        // Three Words: Tight Bold (Maximizing every pixel)
+        u8g2.setFont(u8g2_font_helvB10_tf); // Slightly smaller than B12 but much thicker than 7x14
+        int w1 = u8g2.getStrWidth(words[0].c_str());
+        int w2 = u8g2.getStrWidth(words[1].c_str());
+        int w3 = u8g2.getStrWidth(words[2].c_str());
+        
+        // Tight vertical spacing: 18, 38, 58
+        u8g2.drawStr(64 - (w1 / 2), 18, words[0].c_str());
+        u8g2.drawStr(64 - (w2 / 2), 38, words[1].c_str());
+        u8g2.drawStr(64 - (w3 / 2), 58, words[2].c_str());
+      }
+
+      if (elapsed > 3000) currentState = HOME;
+      break;
     }
+
     case PETTING: {
       unsigned long elapsed = now - stateStartTime;
-      
-      // Slow "Breathing" bounce for the rabbit face
       int bounce = abs(3 * sin(elapsed * 0.004)); 
-      
-      u8g2.clearBuffer(); 
-
-      // 1. Draw Mega Rabbit Ears (Twitching)
       drawRabbitEars(30, 17 - bounce, bounce); 
       drawRabbitEars(98, 17 - bounce, bounce);
-
-      // 2. MEGA EYES with "U" shaped bliss pupils
       drawPettingEye(30, 17 - bounce);
       drawPettingEye(98, 17 - bounce);
-
-      // 3. Rabbit Sniffing Nose & Whiskers
       drawRabbitMouth(64, 56, (elapsed % 500 < 250));
-
-      // 4. Purr Feedback
-      if ((now / 100) % 2 == 0) {
-        digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(80); digitalWrite(BUZZER_PIN, LOW);
+      if (elapsed % 150 < 40) {
+        digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(120); digitalWrite(BUZZER_PIN, LOW);
       }
       break;
     }
     
-   case BLINK: {
+    case BLINK: {
       unsigned long elapsed = now - stateStartTime;
-      int pupilX = 0;
-      bool eyeClosed = false;
+      int pX = 0; bool eClosed = false;
+      if (elapsed < 400) pX = -8; 
+      else if (elapsed < 800) pX = 8;  
+      else if (elapsed < 1000) pX = 0; 
+      else if (elapsed < 1350) eClosed = true;
 
-      // Timing: Look Left -> Right -> Center -> Big Blink
-      if (elapsed < 400)      pupilX = -8; 
-      else if (elapsed < 800) pupilX = 8;  
-      else if (elapsed < 1000) pupilX = 0; 
-      else if (elapsed < 1350) eyeClosed = true;
+      drawMovingEye(30, 17, eClosed, pX);
+      drawMovingEye(98, 17, eClosed, pX);
+      drawUltraMouth(64, 58, eClosed); 
 
-      // EYE UP: Touches upper boundary
-      drawMovingEye(30, 17, eyeClosed, pupilX);
-      drawMovingEye(98, 17, eyeClosed, pupilX);
+      if (elapsed >= 1000 && elapsed < 1020 && !isAutoBlink) {
+        digitalWrite(BUZZER_PIN, HIGH); delay(2); digitalWrite(BUZZER_PIN, LOW);
+      }
 
-      // MEGA MOUTH: Wide and Thick at the bottom
-      drawUltraMouth(64, 58, eyeClosed); 
-
-      if (elapsed > 1500) currentState = HOME;
+      if (elapsed > 1500) {
+        if (isAutoBlink) {
+          currentState = HOME;
+        } else {
+          selectedCompliment = random(0, 100); // Changed from 50 to 100
+          currentState = COMPLIMENT;
+          stateStartTime = millis();
+        }
+      }
       break;
     }
 
-   case HEART: {
+    case HEART: {
       unsigned long elapsed = now - stateStartTime;
-      int pupilX = 0;
-      bool eyeClosed = false;
+      int pX = 0; bool eClosed = false;
+      if (elapsed < 400) pX = -6; 
+      else if (elapsed < 800) pX = 6;  
+      else if (elapsed < 1000) pX = 0; 
+      else if (elapsed < 1400) eClosed = true;
 
-      // 1. TIMING LOGIC
-      if (elapsed < 400)      pupilX = -6; 
-      else if (elapsed < 800) pupilX = 6;  
-      else if (elapsed < 1000) pupilX = 0; 
-      else if (elapsed < 1400) eyeClosed = true;
+      if (elapsed % 200 < 50) drawBackgroundFirework(random(0, 128), random(0, 64), 15);
+      drawMegaHeartBlink(32, 25, eClosed, pX);
+      drawMegaHeartBlink(96, 25, eClosed, pX);
 
-      // 2. DRAW FIRECRACKERS FIRST (Background Layer)
-      // We trigger a burst every 200ms to keep the screen busy
-      if (elapsed % 200 < 50) {
-        // We spread them across the whole screen: X(0-128), Y(0-64)
-        drawBackgroundFirework(random(0, 128), random(0, 64), 15);
+      if (elapsed % 800 < 20 || (elapsed % 800 > 100 && elapsed % 800 < 120)) {
+        digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(150); digitalWrite(BUZZER_PIN, LOW);
       }
-
-      // 3. DRAW HEARTS ON TOP (Foreground Layer)
-      drawMegaHeartBlink(32, 25, eyeClosed, pupilX);
-      drawMegaHeartBlink(96, 25, eyeClosed, pupilX);
-
-      // 4. OPTIONAL: Add Crackle Sound
-      if (elapsed % 150 < 10) {
-        digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(100); digitalWrite(BUZZER_PIN, LOW);
-      }
-
       if (elapsed > 1600) currentState = HOME;
       break;
     }
 
     case EXCITED: {
       unsigned long elapsed = now - stateStartTime;
-      
-      // 1. CRAZY JITTER: Randomly shift everything by -2 to +2 pixels
-      int shakeX = random(-2, 3); 
-      int shakeY = random(-2, 3);
-      
-      // 2. OPEN "V" MOUTH (Huge Scream/Smile)
-      // We shift it by the shake offsets
-      drawCrazyMouth(64 + shakeX, 52 + shakeY);
-
-      // 3. WOBBLY MEGA EYES
-      // One eye might be slightly larger than the other for a "crazy" look
-      int eyePulse = (elapsed % 200 < 100) ? 2 : 0; 
-      drawCrazyEye(30 + shakeX, 22 + shakeY, 17 + eyePulse); // Left
-      drawCrazyEye(98 + shakeX, 22 + shakeY, 17 - eyePulse); // Right
-
-      // 4. BACKGROUND DEBRIS: Random "Speed Lines" popping everywhere
+      int sX = random(-2, 3); int sY = random(-2, 3);
+      drawCrazyMouth(64 + sX, 52 + sY);
+      int ePulse = (elapsed % 200 < 100) ? 2 : 0; 
+      drawCrazyEye(30 + sX, 22 + sY, 17 + ePulse); 
+      drawCrazyEye(98 + sX, 22 + sY, 17 - ePulse); 
       for(int i=0; i<4; i++) {
-        int rx = random(0, 128);
-        int ry = random(0, 64);
+        int rx = random(0, 128); int ry = random(0, 64);
         u8g2.drawLine(rx, ry, rx + random(-5, 6), ry + random(-5, 6));
       }
-
-      // 5. BUZZER FEEDBACK: High-pitched "Excitement" beep
-      if (elapsed % 100 < 20) {
-        digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(100); digitalWrite(BUZZER_PIN, LOW);
-      }
-
+      digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(random(50, 200)); digitalWrite(BUZZER_PIN, LOW);
       if (elapsed > 2500) currentState = HOME;
       break;
     }
-  }
-  u8g2.sendBuffer();
+  } 
+
+  u8g2.sendBuffer(); 
 }
